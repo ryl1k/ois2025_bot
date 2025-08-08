@@ -1,11 +1,13 @@
+require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const path = require('path');
 
-const token = 'token';
+const token = process.env.BOT_TOKEN;
 const bot = new TelegramBot(token, {polling: true});
 
-const ADMIN_ID = '976737843';
+const ADMIN_ID = process.env.ADMIN_ID;
+const TARGET_CHAT = process.env.TARGET_CHAT;
 
 function readMessageFile(fileName) {
   try {
@@ -61,7 +63,15 @@ bot.onText(/\/broadcast (.+)/, (msg, match) => {
   }
   
   const message = match[1];
-  bot.sendMessage(chatId, message);
+  
+  bot.sendMessage(TARGET_CHAT, message)
+    .then(() => {
+      bot.sendMessage(chatId, 'Повідомлення надіслано в канал OIS_2025 ✅');
+    })
+    .catch((error) => {
+      console.error('Помилка надсилання в канал:', error);
+      bot.sendMessage(chatId, 'Помилка надсилання повідомлення ❌');
+    });
 });
 
 bot.on('callback_query', (callbackQuery) => {
