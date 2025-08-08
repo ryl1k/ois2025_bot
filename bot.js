@@ -41,17 +41,54 @@ const menuKeyboard = {
 bot.on('new_chat_members', (msg) => {
   const chatId = msg.chat.id;
   const messageId = msg.message_id;
-  bot.sendMessage(chatId, 'Бот', {reply_to_message_id: messageId});
+  const newMembers = msg.new_chat_members;
+  
+  const welcomeMessage = `🎓 Вітаю в чаті OIS 2025! 
+
+Я бот-помічник, який допоможе вам зорієнтуватися в навчанні. 
+
+📋 Доступні команди:
+/menu - відкрити головне меню з інформацією
+/start - почати роботу з ботом
+
+💡 Через меню ви можете дізнатися про:
+• Комісії та оцінювання
+• Важливі дати
+• Предмети та розклад  
+• Стипендії та їх види
+• Систему оцінювання
+
+Бажаю успіхів у навчанні! 📚✨`;
+
+  bot.sendMessage(chatId, welcomeMessage, {reply_to_message_id: messageId});
 });
 
 bot.onText(/\/menu/, (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, 'Оберіть розділ:', menuKeyboard);
+  const menuMessage = `📚 Головне меню OIS 2025
+
+Оберіть розділ для отримання детальної інформації:`;
+  
+  bot.sendMessage(chatId, menuMessage, menuKeyboard);
 });
 
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, 'Вітаю! Використовуйте /menu для відкриття головного меню.');
+  const startMessage = `🎓 Вітаю! Я бот-помічник для студентів OIS 2025.
+
+Я можу допомогти вам з інформацією про:
+📋 Комісії та систему оцінювання
+📅 Важливі дати семестру
+📚 Предмети першого курсу
+🕐 Розклад занять
+💰 Стипендії та їх види
+📊 Систему рейтингового оцінювання
+
+Використовуйте /menu для відкриття головного меню з детальною інформацією.
+
+Удачі в навчанні! ✨`;
+  
+  bot.sendMessage(chatId, startMessage);
 });
 
 bot.onText(/\/broadcast (.+)/, (msg, match) => {
@@ -78,6 +115,21 @@ bot.on('callback_query', (callbackQuery) => {
   const message = callbackQuery.message;
   const data = callbackQuery.data;
   const chatId = message.chat.id;
+
+  if (data === 'back_to_menu') {
+    const menuMessage = `📚 Головне меню OIS 2025
+
+Оберіть розділ для отримання детальної інформації:`;
+    
+    bot.editMessageText(menuMessage, {
+      chat_id: chatId,
+      message_id: message.message_id,
+      reply_markup: menuKeyboard.reply_markup
+    });
+    
+    bot.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
 
   let messageContent = '';
   let fileName = '';
@@ -117,21 +169,6 @@ bot.on('callback_query', (callbackQuery) => {
   });
 
   bot.answerCallbackQuery(callbackQuery.id);
-});
-
-bot.on('callback_query', (callbackQuery) => {
-  if (callbackQuery.data === 'back_to_menu') {
-    const message = callbackQuery.message;
-    const chatId = message.chat.id;
-    
-    bot.editMessageText('Оберіть розділ:', {
-      chat_id: chatId,
-      message_id: message.message_id,
-      reply_markup: menuKeyboard.reply_markup
-    });
-    
-    bot.answerCallbackQuery(callbackQuery.id);
-  }
 });
 
 console.log('Бот запущено і очікує на повідомлення...');
