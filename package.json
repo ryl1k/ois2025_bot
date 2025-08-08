@@ -1,0 +1,12 @@
+{
+  "name": "ois2025-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that responds to new members",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}

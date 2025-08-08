@@ -1,0 +1,127 @@
+const TelegramBot = require('node-telegram-bot-api');
+const fs = require('fs');
+const path = require('path');
+
+const token = 'token';
+const bot = new TelegramBot(token, {polling: true});
+
+const ADMIN_ID = '976737843';
+
+function readMessageFile(fileName) {
+  try {
+    const filePath = path.join(__dirname, 'messages', fileName);
+    return fs.readFileSync(filePath, 'utf8');
+  } catch (error) {
+    console.error(`Помилка читання файлу ${fileName}:`, error);
+    return 'Помилка завантаження повідомлення';
+  }
+}
+
+const menuKeyboard = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: '📋 Комісія', callback_data: 'commission' },
+        { text: '📅 Дати', callback_data: 'dates' }
+      ],
+      [
+        { text: '📚 Предмети', callback_data: 'subjects' },
+        { text: '🕐 Розклад', callback_data: 'schedule' }
+      ],
+      [
+        { text: '💰 Стипендія', callback_data: 'studentship' },
+        { text: '📊 Оцінювання', callback_data: 'rating' }
+      ]
+    ]
+  }
+};
+
+bot.on('new_chat_members', (msg) => {
+  const chatId = msg.chat.id;
+  const messageId = msg.message_id;
+  bot.sendMessage(chatId, 'Бот', {reply_to_message_id: messageId});
+});
+
+bot.onText(/\/menu/, (msg) => {
+  const chatId = msg.chat.id;
+  bot.sendMessage(chatId, 'Оберіть розділ:', menuKeyboard);
+});
+
+bot.onText(/\/start/, (msg) => {
+  const chatId = msg.chat.id;
+  bot.sendMessage(chatId, 'Вітаю! Використовуйте /menu для відкриття головного меню.');
+});
+
+bot.onText(/\/broadcast (.+)/, (msg, match) => {
+  const chatId = msg.chat.id;
+  
+  if (chatId.toString() !== ADMIN_ID) {
+    bot.sendMessage(chatId, 'У вас немає дозволу на використання цієї команди.');
+    return;
+  }
+  
+  const message = match[1];
+  bot.sendMessage(chatId, message);
+});
+
+bot.on('callback_query', (callbackQuery) => {
+  const message = callbackQuery.message;
+  const data = callbackQuery.data;
+  const chatId = message.chat.id;
+
+  let messageContent = '';
+  let fileName = '';
+
+  switch (data) {
+    case 'commission':
+      fileName = 'commission.txt';
+      break;
+    case 'dates':
+      fileName = 'dates.txt';
+      break;
+    case 'subjects':
+      fileName = 'subjects.txt';
+      break;
+    case 'schedule':
+      fileName = 'schedule.txt';
+      break;
+    case 'studentship':
+      fileName = 'studentship.txt';
+      break;
+    case 'rating':
+      fileName = 'rating.txt';
+      break;
+    default:
+      bot.answerCallbackQuery(callbackQuery.id, 'Невідома команда');
+      return;
+  }
+
+  messageContent = readMessageFile(fileName);
+  
+  bot.editMessageText(messageContent, {
+    chat_id: chatId,
+    message_id: message.message_id,
+    reply_markup: {
+      inline_keyboard: [[{ text: '⬅️ Назад до меню', callback_data: 'back_to_menu' }]]
+    }
+  });
+
+  bot.answerCallbackQuery(callbackQuery.id);
+});
+
+bot.on('callback_query', (callbackQuery) => {
+  if (callbackQuery.data === 'back_to_menu') {
+    const message = callbackQuery.message;
+    const chatId = message.chat.id;
+    
+    bot.editMessageText('Оберіть розділ:', {
+      chat_id: chatId,
+      message_id: message.message_id,
+      reply_markup: menuKeyboard.reply_markup
+    });
+    
+    bot.answerCallbackQuery(callbackQuery.id);
+  }
+});
+
+console.log('Бот запущено і очікує на повідомлення...');
