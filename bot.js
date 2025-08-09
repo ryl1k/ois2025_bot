@@ -60,7 +60,7 @@ bot.on('message', (msg) => {
 
 bot.onText(/\/menu/, (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, 'Оберіть розділ:', menuKeyboard);
+    bot.sendMessage(chatId, 'Більше корисної інформації тут: https://t.me/EhPhBekPivEwN2Uy \nОберіть розділ:', menuKeyboard);
 });
 
 bot.onText(/\/start/, (msg) => {
