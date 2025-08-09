@@ -44,6 +44,20 @@ bot.on('new_chat_members', (msg) => {
   bot.sendMessage(chatId, 'Бот', {reply_to_message_id: messageId});
 });
 
+bot.on('message', (msg) => {
+  if (msg.reply_to_message && msg.reply_to_message.from.is_bot) {
+    const originalText = msg.reply_to_message.text;
+    const replyText = msg.text;
+    const chatId = msg.chat.id;
+    
+    if (originalText === 'Бот' && replyText) {
+      bot.sendMessage(chatId, 'Сам бот', {reply_to_message_id: msg.message_id});
+    } else if ((originalText === 'Сам бот' || originalText === 'Бот') && replyText === 'Не бот') {
+      bot.sendMessage(chatId, 'Це так не працює', {reply_to_message_id: msg.message_id});
+    }
+  }
+});
+
 bot.onText(/\/menu/, (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(chatId, 'Оберіть розділ:', menuKeyboard);
@@ -78,6 +92,17 @@ bot.on('callback_query', (callbackQuery) => {
   const message = callbackQuery.message;
   const data = callbackQuery.data;
   const chatId = message.chat.id;
+
+  if (data === 'back_to_menu') {
+    bot.editMessageText('Оберіть розділ:', {
+      chat_id: chatId,
+      message_id: message.message_id,
+      reply_markup: menuKeyboard.reply_markup
+    });
+    
+    bot.answerCallbackQuery(callbackQuery.id);
+    return;
+  }
 
   let messageContent = '';
   let fileName = '';
@@ -117,21 +142,6 @@ bot.on('callback_query', (callbackQuery) => {
   });
 
   bot.answerCallbackQuery(callbackQuery.id);
-});
-
-bot.on('callback_query', (callbackQuery) => {
-  if (callbackQuery.data === 'back_to_menu') {
-    const message = callbackQuery.message;
-    const chatId = message.chat.id;
-    
-    bot.editMessageText('Оберіть розділ:', {
-      chat_id: chatId,
-      message_id: message.message_id,
-      reply_markup: menuKeyboard.reply_markup
-    });
-    
-    bot.answerCallbackQuery(callbackQuery.id);
-  }
 });
 
 console.log('Бот запущено і очікує на повідомлення...');
