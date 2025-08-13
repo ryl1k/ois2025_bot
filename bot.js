@@ -3,6 +3,8 @@ const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const path = require('path');
 const Groq = require('groq-sdk');
+const axios = require('axios');
+const cheerio = require('cheerio');
 
 const token = process.env.BOT_TOKEN;
 const bot = new TelegramBot(token, {polling: true});
@@ -13,6 +15,12 @@ const TARGET_CHAT = process.env.TARGET_CHAT;
 const groq = new Groq(process.env.GROQ_API_KEY);
 
 const conversationHistory = new Map();
+
+const MEMORY_CONFIG = {
+  MAX_HISTORY_TOKENS: 4000,
+  COMPACT_TO_TOKENS: 2000,
+  COMPACT_THRESHOLD: 0.8
+};
 
 function readMessageFile(fileName) {
   try {
@@ -38,17 +46,83 @@ function getConversationKey(chatId, userId) {
   return `${chatId}_${userId}`;
 }
 
-function addToHistory(chatId, userId, role, content) {
+function estimateTokens(text) {
+  return Math.ceil(text.length / 3.5);
+}
+
+function calculateHistoryTokens(history) {
+  return history.reduce((total, msg) => {
+    return total + estimateTokens(msg.content);
+  }, 0);
+}
+
+async function compactHistory(history) {
+  if (history.length <= 3) return history;
+  
+  const systemMessage = history[0]?.role === 'system' ? history[0] : null;
+  const recentMessages = history.slice(-3);
+  const middleMessages = history.slice(systemMessage ? 1 : 0, -3);
+  
+  if (middleMessages.length === 0) return history;
+  
+  try {
+    const conversationSummary = middleMessages.map(msg => 
+      `${msg.role}: ${msg.content.substring(0, 200)}...`
+    ).join('\n');
+    
+    const summaryPrompt = `Зсумуй цю частину розмови в 2-3 реченнях, зберігши ключові моменти:\n${conversationSummary}`;
+    
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [
+        { role: 'system', content: 'Ти помічник, який створює короткі та точні саммарі розмов.' },
+        { role: 'user', content: summaryPrompt }
+      ],
+      model: 'llama3-8b-8192',
+      temperature: 0.3,
+      max_tokens: 200
+    });
+    
+    const summary = chatCompletion.choices[0]?.message?.content || 'Попередня частина розмови.';
+    
+    const compactedHistory = [];
+    if (systemMessage) compactedHistory.push(systemMessage);
+    
+    compactedHistory.push({
+      role: 'assistant',
+      content: `[Саммарі попередньої розмови: ${summary}]`,
+      timestamp: Date.now(),
+      isCompacted: true
+    });
+    
+    compactedHistory.push(...recentMessages);
+    
+    console.log(`Історія скомпактована: ${history.length} → ${compactedHistory.length} повідомлень`);
+    return compactedHistory;
+    
+  } catch (error) {
+    console.error('Помилка компактування історії:', error);
+    return history.slice(-10);
+  }
+}
+
+async function addToHistory(chatId, userId, role, content) {
   const key = getConversationKey(chatId, userId);
   if (!conversationHistory.has(key)) {
     conversationHistory.set(key, []);
   }
   
-  const history = conversationHistory.get(key);
+  let history = conversationHistory.get(key);
   history.push({ role, content, timestamp: Date.now() });
   
-  if (history.length > 20) {
-    history.splice(0, history.length - 20);
+  const totalTokens = calculateHistoryTokens(history);
+  
+  if (totalTokens > MEMORY_CONFIG.MAX_HISTORY_TOKENS * MEMORY_CONFIG.COMPACT_THRESHOLD) {
+    console.log(`Перевищено ліміт токенів (${totalTokens}/${MEMORY_CONFIG.MAX_HISTORY_TOKENS}), компактуємо історію...`);
+    history = await compactHistory(history);
+  }
+  
+  if (history.length > 25) {
+    history.splice(0, history.length - 25);
   }
   
   conversationHistory.set(key, history);
@@ -59,8 +133,312 @@ function getHistory(chatId, userId) {
   return conversationHistory.get(key) || [];
 }
 
+async function searchWeb(query) {
+  try {
+    const searchUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const response = await axios.get(searchUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      },
+      timeout: 10000
+    });
+    
+    const $ = cheerio.load(response.data);
+    const results = [];
+    
+    $('.result').each((i, elem) => {
+      if (i < 3) {
+        const title = $(elem).find('.result__title a').text().trim();
+        const snippet = $(elem).find('.result__snippet').text().trim();
+        const url = $(elem).find('.result__title a').attr('href');
+        
+        if (title && snippet) {
+          results.push({
+            title,
+            snippet,
+            url
+          });
+        }
+      }
+    });
+    
+    return results;
+  } catch (error) {
+    console.error('Помилка веб-пошуку:', error);
+    return [];
+  }
+}
+
+async function getRepoInfo(repo) {
+  try {
+    const repoUrl = `https://api.github.com/repos/${repo}`;
+    const response = await axios.get(repoUrl, {
+      timeout: 10000,
+      headers: {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'OIS2025-Bot'
+      }
+    });
+    
+    return {
+      name: response.data.name,
+      description: response.data.description,
+      language: response.data.language,
+      stars: response.data.stargazers_count,
+      forks: response.data.forks_count,
+      size: response.data.size,
+      topics: response.data.topics || [],
+      license: response.data.license?.name,
+      created_at: response.data.created_at,
+      updated_at: response.data.updated_at
+    };
+  } catch (error) {
+    console.error('Помилка отримання інформації про репозиторій:', error);
+    return null;
+  }
+}
+
+async function analyzeRepoStructure(repo) {
+  try {
+    const rootContents = await fetchFromGitHub(repo);
+    if (!rootContents || rootContents.type !== 'directory') return null;
+    
+    const importantFiles = ['README.md', 'README.txt', 'package.json', 'requirements.txt', 'Cargo.toml', 'pom.xml', 'go.mod', 'setup.py'];
+    const configFiles = ['.gitignore', 'Dockerfile', 'docker-compose.yml', '.github'];
+    
+    const structure = {
+      files: rootContents.files,
+      hasReadme: false,
+      readmeContent: '',
+      packageInfo: null,
+      hasTests: false,
+      hasDocs: false,
+      hasCI: false,
+      mainLanguage: null
+    };
+    
+    for (const file of rootContents.files) {
+      if (file.name.toLowerCase().includes('readme')) {
+        structure.hasReadme = true;
+        const readmeData = await fetchFromGitHub(repo, file.name);
+        if (readmeData && readmeData.type === 'file') {
+          structure.readmeContent = readmeData.content;
+        }
+      }
+      
+      if (file.name === 'package.json') {
+        const packageData = await fetchFromGitHub(repo, file.name);
+        if (packageData && packageData.type === 'file') {
+          try {
+            structure.packageInfo = JSON.parse(packageData.content);
+          } catch (e) {}
+        }
+      }
+      
+      if (file.name.toLowerCase().includes('test') || file.name === '__tests__') {
+        structure.hasTests = true;
+      }
+      
+      if (file.name.toLowerCase().includes('doc') || file.name === 'docs') {
+        structure.hasDocs = true;
+      }
+      
+      if (file.name === '.github') {
+        structure.hasCI = true;
+      }
+    }
+    
+    return structure;
+  } catch (error) {
+    console.error('Помилка аналізу структури репозиторія:', error);
+    return null;
+  }
+}
+
+async function fetchFromGitHub(repo, path = '') {
+  try {
+    const apiUrl = `https://api.github.com/repos/${repo}/contents/${path}`;
+    const response = await axios.get(apiUrl, {
+      timeout: 10000,
+      headers: {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'OIS2025-Bot'
+      }
+    });
+    
+    if (response.data.type === 'file') {
+      const content = Buffer.from(response.data.content, 'base64').toString('utf-8');
+      return {
+        type: 'file',
+        name: response.data.name,
+        content: content.length > 2000 ? content.substring(0, 2000) + '...' : content
+      };
+    } else if (response.data.length) {
+      return {
+        type: 'directory',
+        files: response.data.map(item => ({
+          name: item.name,
+          type: item.type,
+          size: item.size
+        })).slice(0, 10)
+      };
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Помилка GitHub API:', error);
+    return null;
+  }
+}
+
+function formatRepoAnalysis(repoInfo, structure) {
+  let analysis = '';
+  
+  if (repoInfo) {
+    analysis += `📦 **${repoInfo.name}**\n`;
+    if (repoInfo.description) analysis += `📝 ${repoInfo.description}\n`;
+    analysis += `🌟 ${repoInfo.stars} зірок | 🍴 ${repoInfo.forks} форків\n`;
+    if (repoInfo.language) analysis += `💻 Основна мова: ${repoInfo.language}\n`;
+    if (repoInfo.license) analysis += `📜 Ліцензія: ${repoInfo.license}\n`;
+    if (repoInfo.topics && repoInfo.topics.length > 0) {
+      analysis += `🏷️ Теги: ${repoInfo.topics.join(', ')}\n`;
+    }
+    analysis += '\n';
+  }
+  
+  if (structure) {
+    analysis += '📁 **Структура проекту:**\n';
+    
+    if (structure.hasReadme) {
+      analysis += '✅ README присутній\n';
+    } else {
+      analysis += '❌ README відсутній\n';
+    }
+    
+    if (structure.packageInfo) {
+      analysis += `✅ package.json: ${structure.packageInfo.name}\n`;
+      if (structure.packageInfo.scripts) {
+        const scripts = Object.keys(structure.packageInfo.scripts).slice(0, 3);
+        analysis += `🔧 Скрипти: ${scripts.join(', ')}\n`;
+      }
+    }
+    
+    analysis += `${structure.hasTests ? '✅' : '❌'} Тести\n`;
+    analysis += `${structure.hasDocs ? '✅' : '❌'} Документація\n`;
+    analysis += `${structure.hasCI ? '✅' : '❌'} CI/CD\n\n`;
+    
+    if (structure.readmeContent) {
+      analysis += '📖 **Опис з README:**\n';
+      const summary = structure.readmeContent.substring(0, 500);
+      analysis += summary + (structure.readmeContent.length > 500 ? '...' : '') + '\n\n';
+    }
+    
+    analysis += '📋 **Рекомендації:**\n';
+    const recommendations = [];
+    
+    if (!structure.hasReadme) recommendations.push('• Додати README.md з описом проекту');
+    if (!structure.hasTests) recommendations.push('• Додати тести для покращення якості коду');
+    if (!structure.hasDocs) recommendations.push('• Створити документацію');
+    if (!structure.hasCI) recommendations.push('• Налаштувати GitHub Actions для автоматизації');
+    
+    if (recommendations.length === 0) {
+      recommendations.push('• Проект має гарну структуру! Продовжуйте в тому ж дусі');
+    }
+    
+    analysis += recommendations.join('\n');
+  }
+  
+  return analysis;
+}
+
+async function fetchWebPage(url) {
+  try {
+    const response = await axios.get(url, {
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    
+    const $ = cheerio.load(response.data);
+    
+    $('script, style, nav, footer, aside').remove();
+    
+    const title = $('title').text().trim() || 'Без назви';
+    const content = $('body').text()
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 1500);
+    
+    return {
+      title,
+      content,
+      url
+    };
+  } catch (error) {
+    console.error('Помилка завантаження сторінки:', error);
+    return null;
+  }
+}
+
 async function getGroqResponse(userMessage, chatId, userId) {
   try {
+    let additionalContext = '';
+    
+    const githubRegex = /github\.com\/([^\/]+\/[^\/\s]+)(?:\/blob\/[^\/]+)?(?:\/(.+))?/;
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const searchRegex = /(?:пошукай|знайди|search|найди|шукай)\s+(.+)/i;
+    
+    if (githubRegex.test(userMessage)) {
+      const match = userMessage.match(githubRegex);
+      const repo = match[1];
+      const path = match[2] || '';
+      
+      if (path) {
+        const githubData = await fetchFromGitHub(repo, path);
+        if (githubData) {
+          if (githubData.type === 'file') {
+            additionalContext = `\n\nВміст файлу ${githubData.name} з GitHub:\n${githubData.content}`;
+          } else if (githubData.type === 'directory') {
+            additionalContext = `\n\nВміст директорії з GitHub:\n${githubData.files.map(f => `- ${f.name} (${f.type})`).join('\n')}`;
+          }
+        }
+      } else {
+        const [repoInfo, structure] = await Promise.all([
+          getRepoInfo(repo),
+          analyzeRepoStructure(repo)
+        ]);
+        
+        if (repoInfo || structure) {
+          const analysis = formatRepoAnalysis(repoInfo, structure);
+          additionalContext = `\n\nАналіз GitHub репозиторія:\n${analysis}`;
+        }
+      }
+    }
+    
+    else if (urlRegex.test(userMessage)) {
+      const urls = userMessage.match(urlRegex);
+      if (urls && urls.length > 0) {
+        const pageData = await fetchWebPage(urls[0]);
+        if (pageData) {
+          additionalContext = `\n\nВміст веб-сторінки "${pageData.title}":\n${pageData.content}`;
+        }
+      }
+    }
+    
+    else if (searchRegex.test(userMessage)) {
+      const searchMatch = userMessage.match(searchRegex);
+      if (searchMatch && searchMatch[1]) {
+        const searchResults = await searchWeb(searchMatch[1]);
+        if (searchResults.length > 0) {
+          additionalContext = '\n\nРезультати пошуку:\n' + 
+            searchResults.map((result, i) => 
+              `${i + 1}. ${result.title}\n${result.snippet}\n${result.url}\n`
+            ).join('\n');
+        }
+      }
+    }
+    
     const systemPrompt = readSystemPrompt();
     const history = getHistory(chatId, userId);
     
@@ -74,19 +452,20 @@ async function getGroqResponse(userMessage, chatId, userId) {
       }
     });
     
-    messages.push({ role: 'user', content: userMessage });
+    const fullMessage = userMessage + additionalContext;
+    messages.push({ role: 'user', content: fullMessage });
     
     const chatCompletion = await groq.chat.completions.create({
       messages: messages,
       model: 'llama3-8b-8192',
       temperature: 0.7,
-      max_tokens: 1000
+      max_tokens: 1500
     });
     
     const response = chatCompletion.choices[0]?.message?.content || 'Вибачте, не можу відповісти на ваше питання.';
     
-    addToHistory(chatId, userId, 'user', userMessage);
-    addToHistory(chatId, userId, 'assistant', response);
+    await addToHistory(chatId, userId, 'user', userMessage);
+    await addToHistory(chatId, userId, 'assistant', response);
     
     return response;
   } catch (error) {
