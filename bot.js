@@ -77,7 +77,7 @@ async function compactHistory(history) {
         { role: 'system', content: 'Ти помічник, який створює короткі та точні саммарі розмов.' },
         { role: 'user', content: summaryPrompt }
       ],
-      model: 'llama3-8b-8192',
+      model: 'openai/gpt-oss-120b',
       temperature: 0.3,
       max_tokens: 200
     });
@@ -131,6 +131,174 @@ async function addToHistory(chatId, userId, role, content) {
 function getHistory(chatId, userId) {
   const key = getConversationKey(chatId, userId);
   return conversationHistory.get(key) || [];
+}
+
+function clearUserMemory(chatId, userId) {
+  const key = getConversationKey(chatId, userId);
+  const hadMemory = conversationHistory.has(key);
+  conversationHistory.delete(key);
+  console.log(`Пам'ять очищено для користувача ${userId} в чаті ${chatId} (ключ: ${key}). Була історія: ${hadMemory}`);
+  return true;
+}
+
+function formatMessageForTelegram(text) {
+  if (!text) return text;
+  
+  try {
+    // Спочатку перевіряємо чи є таблиці і обробляємо їх
+    let formatted = formatTablesForTelegram(text);
+    
+    // Конвертуємо різні типи виділення в Telegram Markdown
+    formatted = formatted
+      // HTML теги
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/br>/gi, '\n')
+      .replace(/<p>/gi, '\n')
+      .replace(/<\/p>/gi, '\n')
+      .replace(/<strong>(.*?)<\/strong>/gi, '*$1*')
+      .replace(/<b>(.*?)<\/b>/gi, '*$1*')
+      .replace(/<em>(.*?)<\/em>/gi, '_$1_')
+      .replace(/<i>(.*?)<\/i>/gi, '_$1_')
+      .replace(/<code>(.*?)<\/code>/gi, '`$1`')
+      .replace(/<pre>(.*?)<\/pre>/gis, '```$1```')
+      .replace(/<u>(.*?)<\/u>/gi, '$1')
+      .replace(/<s>(.*?)<\/s>/gi, '~$1~')
+      .replace(/<strike>(.*?)<\/strike>/gi, '~$1~')
+      .replace(/<del>(.*?)<\/del>/gi, '~$1~')
+      .replace(/<h[1-6]>(.*?)<\/h[1-6]>/gi, '*$1*')
+      .replace(/<ul>/gi, '')
+      .replace(/<\/ul>/gi, '')
+      .replace(/<ol>/gi, '')
+      .replace(/<\/ol>/gi, '')
+      .replace(/<li>(.*?)<\/li>/gi, '• $1\n')
+      .replace(/<a\s+href="([^"]*)"[^>]*>(.*?)<\/a>/gi, '[$2]($1)')
+      .replace(/<img[^>]*alt="([^"]*)"[^>]*>/gi, '🖼️ $1')
+      .replace(/<hr\s*\/?>/gi, '─────────')
+      .replace(/<div[^>]*>/gi, '\n')
+      .replace(/<\/div>/gi, '\n')
+      .replace(/<span[^>]*>/gi, '')
+      .replace(/<\/span>/gi, '')
+      // Видаляємо залишкові HTML теги
+      .replace(/<[^>]*>/g, '')
+      // Markdown форматування
+      .replace(/\*\*(.*?)\*\*/g, '*$1*')
+      .replace(/_(.*?)_/g, '_$1_')
+      .replace(/`(.*?)`/g, '`$1`')
+      .replace(/```([\s\S]*?)```/g, '```$1```')
+      // Заголовки в жирний текст
+      .replace(/^#{1,6}\s+(.*?)$/gm, '*$1*')
+      // Списки з емодзі для кращої читабельності
+      .replace(/^\s*[-*+]\s+/gm, '• ')
+      // Очищаємо зайві переноси рядків
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/^\s+|\s+$/g, '');
+    
+    // Перевіряємо і виправляємо некоректні Markdown символи
+    formatted = fixMarkdownEntities(formatted);
+    
+    return formatted;
+  } catch (error) {
+    console.error('Помилка форматування повідомлення:', error);
+    // Повертаємо простий текст без форматування в разі помилки
+    return text.replace(/<[^>]*>/g, '').replace(/[*_`]/g, '');
+  }
+}
+
+function fixMarkdownEntities(text) {
+  if (!text) return text;
+  
+  try {
+    let fixed = text;
+    
+    // Видаляємо пусті Markdown теги
+    fixed = fixed.replace(/\*\*/g, '').replace(/\*\s*\*/g, '');
+    fixed = fixed.replace(/_{2,}/g, '').replace(/_\s*_/g, '');
+    fixed = fixed.replace(/`{3,}/g, '```').replace(/`\s*`/g, '');
+    fixed = fixed.replace(/~{2,}/g, '~').replace(/~\s*~/g, '');
+    
+    // Виправляємо непарні символи форматування
+    const boldCount = (fixed.match(/\*/g) || []).length;
+    const italicCount = (fixed.match(/_/g) || []).length;
+    const codeCount = (fixed.match(/`/g) || []).length;
+    const strikeCount = (fixed.match(/~/g) || []).length;
+    
+    // Видаляємо останній символ якщо він непарний
+    if (boldCount % 2 !== 0) {
+      const lastBold = fixed.lastIndexOf('*');
+      if (lastBold !== -1) {
+        fixed = fixed.substring(0, lastBold) + fixed.substring(lastBold + 1);
+      }
+    }
+    
+    if (italicCount % 2 !== 0) {
+      const lastItalic = fixed.lastIndexOf('_');
+      if (lastItalic !== -1) {
+        fixed = fixed.substring(0, lastItalic) + fixed.substring(lastItalic + 1);
+      }
+    }
+    
+    if (codeCount % 2 !== 0 && !fixed.includes('```')) {
+      const lastCode = fixed.lastIndexOf('`');
+      if (lastCode !== -1) {
+        fixed = fixed.substring(0, lastCode) + fixed.substring(lastCode + 1);
+      }
+    }
+    
+    if (strikeCount % 2 !== 0) {
+      const lastStrike = fixed.lastIndexOf('~');
+      if (lastStrike !== -1) {
+        fixed = fixed.substring(0, lastStrike) + fixed.substring(lastStrike + 1);
+      }
+    }
+    
+    // Екрануємо спеціальні символи в URL
+    fixed = fixed.replace(/\[([^\]]*)\]\(([^)]*)\)/g, (match, text, url) => {
+      const cleanUrl = url.replace(/[*_`~]/g, '');
+      const cleanText = text.replace(/[*_`~]/g, '');
+      return `[${cleanText}](${cleanUrl})`;
+    });
+    
+    return fixed;
+  } catch (error) {
+    console.error('Помилка виправлення Markdown:', error);
+    return text.replace(/[*_`~]/g, '');
+  }
+}
+
+function formatTablesForTelegram(text) {
+  // Пошук Markdown таблиць (з |)
+  const markdownTableRegex = /(\|[^\n]*\|[\s]*\n)+/g;
+  
+  // Пошук даних схожих на таблиці (кілька рядків з розділювачами | або рядки з ключ-значення)
+  const tableDataRegex = /(?:\|[^\n]*\|[\s]*\n){2,}|(?:^[^|\n]*\|[^|\n]*$[\s]*\n){2,}/gm;
+  
+  // Пошук списків з структурованими даними (ключ: значення)
+  const structuredDataRegex = /(?:^[•\-\*]\s*[^:\n]+:\s*[^\n]+$[\s]*\n){3,}/gm;
+  
+  let formatted = text;
+  
+  // Обробляємо Markdown таблиці
+  formatted = formatted.replace(markdownTableRegex, (match) => {
+    return '```\n' + match.trim() + '\n```\n';
+  });
+  
+  // Обробляємо дані схожі на таблиці
+  formatted = formatted.replace(tableDataRegex, (match) => {
+    if (!match.includes('```')) { // якщо не вже в коді
+      return '```\n' + match.trim() + '\n```\n';
+    }
+    return match;
+  });
+  
+  // Обробляємо структуровані списки (якщо є багато ключ:значення)
+  formatted = formatted.replace(structuredDataRegex, (match) => {
+    if (!match.includes('```')) { // якщо не вже в коді
+      return '```\n' + match.trim() + '\n```\n';
+    }
+    return match;
+  });
+  
+  return formatted;
 }
 
 async function searchWeb(query) {
@@ -457,12 +625,15 @@ async function getGroqResponse(userMessage, chatId, userId) {
     
     const chatCompletion = await groq.chat.completions.create({
       messages: messages,
-      model: 'llama3-8b-8192',
+      model: 'openai/gpt-oss-120b',
       temperature: 0.7,
       max_tokens: 1500
     });
     
-    const response = chatCompletion.choices[0]?.message?.content || 'Вибачте, не можу відповісти на ваше питання.';
+    let response = chatCompletion.choices[0]?.message?.content || 'Вибачте, не можу відповісти на ваше питання.';
+    
+    // Стилізація повідомлень для Telegram
+    response = formatMessageForTelegram(response);
     
     await addToHistory(chatId, userId, 'user', userMessage);
     await addToHistory(chatId, userId, 'assistant', response);
@@ -500,6 +671,50 @@ bot.on('new_chat_members', (msg) => {
 });
 
 bot.on('message', async (msg) => {
+  // Перевіряємо команду очищення пам'яті
+  if (msg.text === '/clear_memory') {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    
+    try {
+      clearUserMemory(chatId, userId);
+      bot.sendMessage(chatId, '*Пам\'ять очищено!* 🧹\n\nВаша історія розмови була видалена. Тепер я почну нову розмову з чистого аркуша.', 
+        { parse_mode: 'Markdown' });
+    } catch (error) {
+      console.error('Помилка очищення пам\'яті:', error);
+      bot.sendMessage(chatId, 'Виникла помилка при очищенні пам\'яті. Спробуйте пізніше.');
+    }
+    return;
+  }
+  
+  // Перевіряємо чи це згадка бота (@ois2025_bot)
+  if (msg.text && msg.text.includes('@ois2025_bot')) {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    
+    // Видаляємо згадку бота з тексту
+    const userPrompt = msg.text.replace(/@ois2025_bot\s*/g, '').trim();
+    
+    if (userPrompt) {
+      const response = await getGroqResponse(userPrompt, chatId, userId);
+      
+      // Спробуємо відправити з Markdown, якщо не вийде - без форматування
+      try {
+        await bot.sendMessage(chatId, response, {
+          reply_to_message_id: msg.message_id,
+          parse_mode: 'Markdown'
+        });
+      } catch (markdownError) {
+        console.error('Помилка Markdown, відправляємо без форматування:', markdownError.message);
+        const plainText = response.replace(/[*_`~]/g, '').replace(/```[\s\S]*?```/g, '');
+        await bot.sendMessage(chatId, plainText, {
+          reply_to_message_id: msg.message_id
+        });
+      }
+    }
+    return;
+  }
+  
   if (msg.reply_to_message && msg.reply_to_message.from.is_bot) {
     const originalText = msg.reply_to_message.text;
     const replyText = msg.text;
@@ -511,7 +726,21 @@ bot.on('message', async (msg) => {
       bot.sendMessage(chatId, 'Це так не працює', {reply_to_message_id: msg.message_id});
     } else {
       const response = await getGroqResponse(replyText, chatId, msg.from.id);
-      bot.sendMessage(chatId, response, {reply_to_message_id: msg.message_id});
+      
+      // Спробуємо відправити з Markdown, якщо не вийде - без форматування
+      try {
+        await bot.sendMessage(chatId, response, {
+          reply_to_message_id: msg.message_id,
+          parse_mode: 'Markdown'
+        });
+      } catch (markdownError) {
+        console.error('Помилка Markdown, відправляємо без форматування:', markdownError.message);
+        // Видаляємо всі Markdown символи і відправляємо як простий текст
+        const plainText = response.replace(/[*_`~]/g, '').replace(/```[\s\S]*?```/g, '');
+        await bot.sendMessage(chatId, plainText, {
+          reply_to_message_id: msg.message_id
+        });
+      }
     }
   }
 });
@@ -526,7 +755,8 @@ bot.onText(/\/start/, (msg) => {
   bot.sendMessage(chatId, 'Вітаю! Використовуйте /menu для відкриття головного меню.');
 });
 
-bot.onText(/\/broadcast (.+)/, (msg, match) => {
+
+bot.onText(/\/broadcast ([\s\S]+)/, (msg, match) => {
   const chatId = msg.chat.id;
   
   if (chatId.toString() !== ADMIN_ID) {
