@@ -15,11 +15,13 @@ const TARGET_CHAT = process.env.TARGET_CHAT;
 const groq = new Groq(process.env.GROQ_API_KEY);
 
 const conversationHistory = new Map();
+const chatMemory = new Map();
 
 const MEMORY_CONFIG = {
-  MAX_HISTORY_TOKENS: 4000,
-  COMPACT_TO_TOKENS: 2000,
-  COMPACT_THRESHOLD: 0.8
+  MAX_HISTORY_TOKENS: 32000,
+  COMPACT_TO_TOKENS: 16000,
+  COMPACT_THRESHOLD: 0.8,
+  CHAT_MEMORY_LIMIT: 100
 };
 
 function readMessageFile(fileName) {
@@ -77,7 +79,7 @@ async function compactHistory(history) {
         { role: 'system', content: 'Ти помічник, який створює короткі та точні саммарі розмов.' },
         { role: 'user', content: summaryPrompt }
       ],
-      model: 'openai/gpt-oss-120b',
+      model: 'llama-3.3-70b-versatile',
       temperature: 0.3,
       max_tokens: 200
     });
@@ -139,6 +141,36 @@ function clearUserMemory(chatId, userId) {
   conversationHistory.delete(key);
   console.log(`Пам'ять очищено для користувача ${userId} в чаті ${chatId} (ключ: ${key}). Була історія: ${hadMemory}`);
   return true;
+}
+
+async function addToChatMemory(chatId, content, author = 'unknown') {
+  if (!chatMemory.has(chatId)) {
+    chatMemory.set(chatId, []);
+  }
+  
+  const memory = chatMemory.get(chatId);
+  memory.push({
+    content: content.substring(0, 200),
+    author,
+    timestamp: Date.now()
+  });
+  
+  if (memory.length > MEMORY_CONFIG.CHAT_MEMORY_LIMIT) {
+    memory.splice(0, memory.length - MEMORY_CONFIG.CHAT_MEMORY_LIMIT);
+  }
+  
+  chatMemory.set(chatId, memory);
+}
+
+function getChatMemoryContext(chatId) {
+  const memory = chatMemory.get(chatId) || [];
+  if (memory.length === 0) return '';
+  
+  const recentMemory = memory.slice(-20).map(m => 
+    `[${m.author}]: ${m.content}`
+  ).join('\n');
+  
+  return `\n\nКонтекст чату:\n${recentMemory}`;
 }
 
 function formatMessageForTelegram(text) {
@@ -609,9 +641,10 @@ async function getGroqResponse(userMessage, chatId, userId) {
     
     const systemPrompt = readSystemPrompt();
     const history = getHistory(chatId, userId);
+    const chatContext = getChatMemoryContext(chatId);
     
     const messages = [
-      { role: 'system', content: systemPrompt }
+      { role: 'system', content: systemPrompt + chatContext }
     ];
     
     history.forEach(msg => {
@@ -625,9 +658,9 @@ async function getGroqResponse(userMessage, chatId, userId) {
     
     const chatCompletion = await groq.chat.completions.create({
       messages: messages,
-      model: 'openai/gpt-oss-120b',
-      temperature: 0.7,
-      max_tokens: 1500
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.6,
+      max_tokens: 2048,
     });
     
     let response = chatCompletion.choices[0]?.message?.content || 'Вибачте, не можу відповісти на ваше питання.';
@@ -687,6 +720,12 @@ bot.on('message', async (msg) => {
     return;
   }
   
+  // Додаємо всі повідомлення до пам'яті чату
+  if (msg.text && msg.from) {
+    const authorName = msg.from.first_name || msg.from.username || 'user';
+    await addToChatMemory(msg.chat.id, msg.text, authorName);
+  }
+  
   // Перевіряємо чи це згадка бота (@ois2025_bot)
   if (msg.text && msg.text.includes('@ois2025_bot')) {
     const chatId = msg.chat.id;
@@ -697,6 +736,7 @@ bot.on('message', async (msg) => {
     
     if (userPrompt) {
       const response = await getGroqResponse(userPrompt, chatId, userId);
+      await addToChatMemory(chatId, response, 'bot');
       
       // Спробуємо відправити з Markdown, якщо не вийде - без форматування
       try {
@@ -720,12 +760,11 @@ bot.on('message', async (msg) => {
     const replyText = msg.text;
     const chatId = msg.chat.id;
     
-    if (originalText === 'Бот' && replyText) {
-      bot.sendMessage(chatId, 'Сам бот', {reply_to_message_id: msg.message_id});
-    } else if ((originalText === 'Сам бот' || originalText === 'Бот') && replyText === 'Не бот') {
+    if (originalText === 'Бот' && replyText === 'Не бот') {
       bot.sendMessage(chatId, 'Це так не працює', {reply_to_message_id: msg.message_id});
     } else {
       const response = await getGroqResponse(replyText, chatId, msg.from.id);
+      await addToChatMemory(chatId, response, 'bot');
       
       // Спробуємо відправити з Markdown, якщо не вийде - без форматування
       try {
